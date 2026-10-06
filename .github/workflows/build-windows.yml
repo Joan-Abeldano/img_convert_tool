@@ -1,0 +1,92 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: PyInstaller onefile
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pillow pyinstaller
+
+      - name: Install optional SVG renderer
+        id: renderer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python -m pip install cairosvg
+          if ($LASTEXITCODE -eq 0) {
+            "bundled=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "bundled=false" >> $env:GITHUB_OUTPUT
+            Write-Host "cairosvg unavailable: SVG to PNG will need an external renderer"
+          }
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $flags = @(
+            "--onefile",
+            "--windowed",
+            "--clean",
+            "--noconfirm",
+            "--name", "logos_tool"
+          )
+          if ("${{ steps.renderer.outputs.bundled }}" -eq "true") {
+            Write-Host "cairosvg installed: bundling it so SVG to PNG works in the exe"
+            $flags += @("--collect-all", "cairosvg")
+          }
+          python -m PyInstaller @flags gui.py
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $exe = ".\dist\logos_tool.exe"
+          if (-not (Test-Path $exe)) { throw "build produced no exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host "exe size: $([math]::Round($size / 1MB, 1)) MB"
+          $process = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 10
+          if ($process.HasExited) {
+            throw "logos_tool.exe exited immediately with code $($process.ExitCode)"
+          }
+          Stop-Process -Id $process.Id -Force
+          Write-Host "exe stayed alive, so tkinter is bundled correctly"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: logos_tool-windows
+          path: |
+            dist/logos_tool.exe
+            logos_tool.spec
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/logos_tool.exe
+          generate_release_notes: true
