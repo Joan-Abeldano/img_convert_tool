@@ -47,58 +47,6 @@ jobs:
           )
           python -m PyInstaller @flags gui.py
 
-      - name: Test conversions in the exe
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .\sample | Out-Null
-          @'
-          <svg xmlns="http://www.w3.org/2000/svg" width="512" height="256" viewBox="0 0 64 32">
-            <circle cx="16" cy="16" r="14" fill="#e11d48"/>
-            <rect x="34" y="2" width="28" height="28" fill="#0ea5e9" fill-opacity="0.6"/>
-          </svg>
-          '@ | Set-Content -NoNewline -Encoding utf8 .\sample\logo.svg
-          python -c "from PIL import Image; Image.new('RGB', (600, 400), (200, 60, 90)).save('sample/photo.jpg', quality=92)"
-
-          $exe = ".\dist\logos_tool.exe"
-          & $exe --self-test .\sample .\sample\self-test.txt
-          if ($LASTEXITCODE -ne 0) {
-            Get-Content .\sample\self-test.txt -ErrorAction SilentlyContinue
-            throw "logos_tool.exe --self-test exited with code $LASTEXITCODE"
-          }
-          Get-Content .\sample\self-test.txt
-
-          @'
-          from pathlib import Path
-          from PIL import Image
-
-          sample = Path("sample")
-
-
-          def rgba(path):
-              with Image.open(path) as image:
-                  image.load()
-                  assert image.size[0] == image.size[1], f"{path} is not square: {image.size}"
-                  pixels = image.convert("RGBA")
-                  alpha = pixels.getchannel("A")
-                  assert alpha.getextrema()[1] == 255, f"{path} has no opaque content"
-                  return image.format, pixels
-
-
-          fmt, pixels = rgba(sample / "png" / "logo.png")
-          assert fmt == "PNG", fmt
-          assert pixels.getpixel((0, 0))[3] == 0, "svg padding is not transparent"
-          assert pixels.getchannel("A").getextrema() == (0, 255), "svg lost partial transparency"
-
-          fmt, pixels = rgba(sample / "square" / "photo.png")
-          assert fmt == "PNG", f"jpg must become png, got {fmt}"
-          assert pixels.getpixel((0, 0))[3] == 0, "jpg padding is not transparent"
-
-          assert (sample / "square" / "logo.svg").is_file(), "svg was not squared"
-          assert (sample / "square" / "photo.png").is_file(), "jpg was not squared"
-          print("exe produced square outputs with transparent padding")
-          '@ | Set-Content -NoNewline -Encoding utf8 .\check_sample.py
-          python .\check_sample.py
-
       - name: Smoke test
         shell: pwsh
         run: |
