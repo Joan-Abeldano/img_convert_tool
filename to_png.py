@@ -21,14 +21,52 @@ from to_square import (
 PNG_OPTIONS = {"optimize": True}
 
 
+ABSOLUTE_UNITS = {"", "px"}
+
+
+def declared_scale(value: float | None, unit: str, relative: bool, base: float) -> float:
+    if value is None or relative or base <= 0 or unit not in ABSOLUTE_UNITS:
+        return 1.0
+    return value / base
+
+
 def svg_pixel_size(box: SvgBox) -> tuple[int, int]:
-    side = max(box.width, box.height)
-    if side > MAX_SIDE:
-        raise ValueError(f"resulting side {fmt_num(side)} exceeds {MAX_SIDE}")
-    return max(1, math.floor(box.width + 0.5)), max(1, math.floor(box.height + 0.5))
+    scale_x = declared_scale(box.width_value, box.width_unit, box.width_relative, box.width)
+    scale_y = declared_scale(box.height_value, box.height_unit, box.height_relative, box.height)
+    width, height = box.width * scale_x, box.height * scale_y
+    if max(width, height) > MAX_SIDE:
+        raise ValueError(f"resulting size {fmt_num(width)}x{fmt_num(height)} exceeds {MAX_SIDE}")
+    return max(1, math.floor(width + 0.5)), max(1, math.floor(height + 0.5))
 
 
-def svg_renderers(width: int, height: int) -> list[list[str]]:
+class RendererMissing(RuntimeError):
+    pass
+
+
+def load_rgba(data: bytes) -> Image.Image:
+    with Image.open(BytesIO(data)) as image:
+        return image.convert("RGBA")
+
+
+def render_resvg(src: Path, width: int, height: int) -> Image.Image:
+    try:
+        import resvg_py
+    except ImportError as error:
+        raise RendererMissing(f"pip install resvg-py ({error})") from error
+
+    return load_rgba(resvg_py.svg_to_bytes(svg_path=str(src), width=width, height=height))
+
+
+def render_cairosvg(src: Path, width: int, height: int) -> Image.Image:
+    try:
+        import cairosvg
+    except ImportError as error:
+        raise RendererMissing(f"pip install cairosvg ({error})") from error
+
+    return load_rgba(cairosvg.svg2png(url=str(src), output_width=width, output_height=height))
+
+
+def render_cli(src: Path, width: int, height: int) -> Image.Image:
     commands: list[list[str]] = []
     if shutil.which("rsvg-convert"):
         commands.append(["rsvg-convert", "-w", str(width), "-h", str(height)])
@@ -40,24 +78,12 @@ def svg_renderers(width: int, height: int) -> list[list[str]]:
     for tool in ("magick", "convert"):
         if shutil.which(tool):
             commands.append([tool, "-background", "none", "-resize", f"{width}x{height}!", "png:-"])
-    return commands
 
+    if not commands:
+        raise RendererMissing("no rsvg-convert/inkscape/magick found in PATH")
 
-def render_svg(src: Path, width: int, height: int) -> Image.Image:
     problems: list[str] = []
-
-    try:
-        import cairosvg
-    except ImportError:
-        problems.append("cairosvg not installed (pip install cairosvg)")
-    else:
-        try:
-            data = cairosvg.svg2png(url=str(src), output_width=width, output_height=height)
-            return Image.open(BytesIO(data)).convert("RGBA")
-        except Exception as error:
-            problems.append(f"cairosvg: {error}")
-
-    for command in svg_renderers(width, height):
+    for command in commands:
         try:
             result = subprocess.run([*command, str(src)], capture_output=True, timeout=300)
         except (OSError, subprocess.SubprocessError) as error:
@@ -67,25 +93,41 @@ def render_svg(src: Path, width: int, height: int) -> Image.Image:
             detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
             problems.append(f"{command[0]}: {detail[-1] if detail else result.returncode}")
             continue
-        return Image.open(BytesIO(result.stdout)).convert("RGBA")
+        return load_rgba(result.stdout)
 
-    raise RuntimeError(
-        "no SVG renderer could handle this file: " + "; ".join(problems or ["none installed"])
-    )
+    raise RuntimeError("; ".join(problems))
+
+
+RENDERERS = [render_resvg, render_cairosvg, render_cli]
+
+
+def render_svg(src: Path, width: int, height: int) -> tuple[Image.Image, str]:
+    global RENDERERS
+    problems: list[str] = []
+    for renderer in list(RENDERERS):
+        name = renderer.__name__[len("render_"):]
+        try:
+            return renderer(src, width, height), name
+        except Exception as error:
+            problems.append(f"{name}: {type(error).__name__}: {error}")
+            if isinstance(error, RendererMissing):
+                RENDERERS.remove(renderer)
+                RENDERERS.append(renderer)
+
+    raise RuntimeError("no SVG renderer available, tried " + "; ".join(problems))
 
 
 def convert_to_png(src: Path, dst: Path, args: Options) -> str:
     if src.suffix.lower() in SVG_EXTS:
         box = svg_box(src.read_bytes())
         width, height = svg_pixel_size(box)
-        rendered = render_svg(src, width, height)
+        rendered, backend = render_svg(src, width, height)
         if rendered.size != (width, height):
-            raise ValueError(f"renderer returned {rendered.size[0]}x{rendered.size[1]}, "
+            raise ValueError(f"{backend} returned {rendered.size[0]}x{rendered.size[1]}, "
                              f"expected {width}x{height}")
         canvas = pad_frame(rendered, True, args.anchor, args.bg)
         canvas.save(dst, "PNG", **PNG_OPTIONS)
-        return (f"{fmt_num(box.width)}x{fmt_num(box.height)} -> "
-                f"{canvas.size[0]}x{canvas.size[1]} (svg rendered)")
+        return (f"{width}x{height} -> {canvas.size[0]}x{canvas.size[1]} (svg via {backend})")
 
     with Image.open(src) as image:
         fmt = (image.format or "").upper()

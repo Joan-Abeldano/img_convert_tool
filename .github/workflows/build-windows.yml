@@ -31,19 +31,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install pillow pyinstaller
-
-      - name: Install optional SVG renderer
-        id: renderer
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          python -m pip install cairosvg
-          if ($LASTEXITCODE -eq 0) {
-            "bundled=true" >> $env:GITHUB_OUTPUT
-          } else {
-            "bundled=false" >> $env:GITHUB_OUTPUT
-            Write-Host "cairosvg unavailable: SVG to PNG will need an external renderer"
-          }
+          python -m pip install resvg-py
+          python -c "import resvg_py; print('resvg renderer bundled')"
 
       - name: Build
         shell: pwsh
@@ -53,21 +42,67 @@ jobs:
             "--windowed",
             "--clean",
             "--noconfirm",
-            "--name", "logos_tool"
+            "--name", "logos_tool",
+            "--collect-all", "resvg_py"
           )
-          if ("${{ steps.renderer.outputs.bundled }}" -eq "true") {
-            Write-Host "cairosvg installed: bundling it so SVG to PNG works in the exe"
-            $flags += @("--collect-all", "cairosvg")
-          }
           python -m PyInstaller @flags gui.py
+
+      - name: Test conversions in the exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .\sample | Out-Null
+          @'
+          <svg xmlns="http://www.w3.org/2000/svg" width="512" height="256" viewBox="0 0 64 32">
+            <circle cx="16" cy="16" r="14" fill="#e11d48"/>
+            <rect x="34" y="2" width="28" height="28" fill="#0ea5e9" fill-opacity="0.6"/>
+          </svg>
+          '@ | Set-Content -NoNewline -Encoding utf8 .\sample\logo.svg
+          python -c "from PIL import Image; Image.new('RGB', (600, 400), (200, 60, 90)).save('sample/photo.jpg', quality=92)"
+
+          $exe = ".\dist\logos_tool.exe"
+          & $exe --self-test .\sample .\sample\self-test.txt
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content .\sample\self-test.txt -ErrorAction SilentlyContinue
+            throw "logos_tool.exe --self-test exited with code $LASTEXITCODE"
+          }
+          Get-Content .\sample\self-test.txt
+
+          @'
+          from pathlib import Path
+          from PIL import Image
+
+          sample = Path("sample")
+
+
+          def rgba(path):
+              with Image.open(path) as image:
+                  image.load()
+                  assert image.size[0] == image.size[1], f"{path} is not square: {image.size}"
+                  pixels = image.convert("RGBA")
+                  alpha = pixels.getchannel("A")
+                  assert alpha.getextrema()[1] == 255, f"{path} has no opaque content"
+                  return image.format, pixels
+
+
+          fmt, pixels = rgba(sample / "png" / "logo.png")
+          assert fmt == "PNG", fmt
+          assert pixels.getpixel((0, 0))[3] == 0, "svg padding is not transparent"
+          assert pixels.getchannel("A").getextrema() == (0, 255), "svg lost partial transparency"
+
+          fmt, pixels = rgba(sample / "square" / "photo.png")
+          assert fmt == "PNG", f"jpg must become png, got {fmt}"
+          assert pixels.getpixel((0, 0))[3] == 0, "jpg padding is not transparent"
+
+          assert (sample / "square" / "logo.svg").is_file(), "svg was not squared"
+          assert (sample / "square" / "photo.png").is_file(), "jpg was not squared"
+          print("exe produced square outputs with transparent padding")
+          '@ | Set-Content -NoNewline -Encoding utf8 .\check_sample.py
+          python .\check_sample.py
 
       - name: Smoke test
         shell: pwsh
         run: |
           $exe = ".\dist\logos_tool.exe"
-          if (-not (Test-Path $exe)) { throw "build produced no exe" }
-          $size = (Get-Item $exe).Length
-          Write-Host "exe size: $([math]::Round($size / 1MB, 1)) MB"
           $process = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 10
           if ($process.HasExited) {
@@ -85,8 +120,12 @@ jobs:
             logos_tool.spec
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('Build {0}', github.run_number) }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          target_commitish: ${{ github.sha }}
           files: dist/logos_tool.exe
           generate_release_notes: true

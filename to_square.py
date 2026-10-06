@@ -14,7 +14,13 @@ RASTER_EXTS = {
 SVG_EXTS = {".svg"}
 SUPPORTED = RASTER_EXTS | SVG_EXTS
 
-ALPHA_FORMATS = {".png", ".webp", ".tif", ".tiff", ".gif", ".avif", ".ppm", ".pgm"}
+ALPHA_FORMATS = {".png", ".webp", ".tif", ".tiff", ".gif", ".avif", ".tga"}
+
+PIL_FORMATS = {
+    ".png": "PNG", ".webp": "WEBP", ".tif": "TIFF", ".tiff": "TIFF", ".gif": "GIF",
+    ".avif": "AVIF", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG", ".jpe": "JPEG",
+    ".jfif": "JPEG", ".bmp": "BMP", ".ppm": "PPM", ".pgm": "PPM",
+}
 
 MAX_SIDE = 16384
 
@@ -25,6 +31,33 @@ class Options:
     bg: tuple[int, int, int] | None = None
     force: bool = False
     lossy: bool = False
+
+
+def output_suffix(suffix: str, transparent: bool) -> str:
+    suffix = suffix.lower()
+    if suffix in SVG_EXTS or not transparent or suffix in ALPHA_FORMATS:
+        return suffix
+    return ".png"
+
+
+def output_format(suffix: str, transparent: bool) -> str:
+    return PIL_FORMATS.get(output_suffix(suffix, transparent), "PNG")
+
+
+def square_target(out: Path, src: Path, args: Options, taken: set[Path]) -> Path:
+    suffix = output_suffix(src.suffix, args.bg is None)
+    if suffix == src.suffix.lower():
+        dst = out / src.name
+        taken.add(dst)
+        return dst
+
+    dst = out / f"{src.stem}{suffix}"
+    index = 2
+    while dst in taken:
+        dst = out / f"{src.stem}_{index}{suffix}"
+        index += 1
+    taken.add(dst)
+    return dst
 
 
 def fmt_num(value: float) -> str:
@@ -64,10 +97,10 @@ def anchor_offsets(size: tuple[int, int], side: int, anchor: str):
 def target_mode(image: Image.Image, transparent: bool) -> str:
     if image.mode in ("RGBA", "LA"):
         return image.mode
+    if transparent:
+        return "RGBA"
     if image.mode in ("1", "I", "F", "I;16", "I;16B", "I;16L", "I;16N"):
         return "L"
-    if transparent:
-        return "RGBA" if image.mode != "LA" else "LA"
     if image.mode in ("RGB", "L", "CMYK"):
         return image.mode
     return "RGB"
@@ -140,9 +173,10 @@ def save_options(fmt: str, lossy: bool, source: Image.Image | None = None) -> di
 
 
 def pad_raster(src: Path, dst: Path | None, args: Options) -> str:
+    transparent = args.bg is None
+    out_fmt = output_format(src.suffix, transparent)
     with Image.open(src) as image:
         fmt = (image.format or "").upper()
-        transparent = args.bg is None and src.suffix.lower() in ALPHA_FORMATS
         animated = getattr(image, "n_frames", 1) > 1 and fmt in ("GIF", "WEBP", "PNG")
 
         if not animated:
@@ -150,18 +184,21 @@ def pad_raster(src: Path, dst: Path | None, args: Options) -> str:
             image = oriented if oriented is not None else image
             width, height = image.size
             side = max(width, height)
-            if (width, height) == (side, side) and not args.force:
+            if (width, height) == (side, side) and not args.force and out_fmt == fmt:
                 return "already square"
             padded = pad_frame(image, transparent, args.anchor, args.bg)
             if dst is not None:
-                options = save_options(fmt, args.lossy, image)
-                if fmt in ("JPEG", "MPO") and padded.mode not in ("L", "RGB", "CMYK"):
+                options = save_options(out_fmt, args.lossy, image)
+                if out_fmt == "JPEG" and padded.mode not in ("L", "RGB", "CMYK"):
                     padded = padded.convert("RGB")
                     exif = image.info.get("exif") or b""
                     if exif:
                         options["exif"] = exif
-                padded.save(dst, fmt, **options)
-            return f"{width}x{height} -> {side}x{side}"
+                padded.save(dst, out_fmt, **options)
+            note = f"{width}x{height} -> {side}x{side}"
+            if (width, height) == (side, side):
+                note = f"{width}x{height} (already 1:1)"
+            return note if out_fmt == fmt else f"{note}, {fmt.lower()} -> {out_fmt.lower()}"
 
         frames, durations = [], []
         for index in range(image.n_frames):
@@ -177,7 +214,7 @@ def pad_raster(src: Path, dst: Path | None, args: Options) -> str:
             return "already square"
 
         if dst is not None:
-            options = save_options(fmt, args.lossy, first)
+            options = save_options(out_fmt, args.lossy, first)
             options.update({
                 "save_all": True,
                 "append_images": frames[1:],
@@ -185,7 +222,7 @@ def pad_raster(src: Path, dst: Path | None, args: Options) -> str:
                 "disposal": 2,
                 "duration": max(10, round((sum(durations) or 100) / len(frames))),
             })
-            first.save(dst, fmt, **options)
+            first.save(dst, out_fmt, **options)
         suffix_note = f" ({len(frames)} frames)" if len(frames) > 1 else ""
         return f"{width}x{height} -> {side}x{side}{suffix_note}"
 
@@ -207,6 +244,8 @@ class SvgBox(NamedTuple):
     height_value: float | None
     width_relative: bool
     height_relative: bool
+    width_unit: str
+    height_unit: str
 
 
 def svg_open_tag(data: bytes) -> tuple[int, int, dict[bytes, tuple[int, int]]]:
@@ -285,6 +324,8 @@ def svg_box(data: bytes) -> SvgBox:
         height_value=height_value,
         width_relative=width_unit == "%",
         height_relative=height_unit == "%",
+        width_unit=width_unit,
+        height_unit=height_unit,
     )
 
 
@@ -347,7 +388,7 @@ def pad_svg(src: Path, dst: Path | None, force: bool) -> str:
     else:
         pixel_side = side * (box.width_value / box.width)
     return (f"{fmt_num(before[0])}x{fmt_num(before[1])} -> "
-            f"{fmt_num(pixel_side)}x{fmt_num(side)}")
+            f"{fmt_num(pixel_side)}x{fmt_num(pixel_side)}")
 
 
 def square_file(src: Path, dst: Path | None, args: Options) -> str:

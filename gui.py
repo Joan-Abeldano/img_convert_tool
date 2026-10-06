@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import shutil
+import sys
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -35,22 +36,25 @@ def png_target(out: Path, path: Path, taken: set[Path]) -> Path:
     return dst
 
 
-def convert(folder: Path, mode: str, report) -> None:
+def convert(folder: Path, mode: str, report) -> tuple[int, int]:
     if not folder.is_dir():
         report(f"Not a folder: {folder}")
-        return
+        return 0, 0
     out = folder / JOBS[mode][1]
     files = images_in(folder)
     if not files:
         report(f"No supported images in {folder}")
-        return
+        return 0, 0
 
     args = to_square.Options()
     out.mkdir(parents=True, exist_ok=True)
     report(f"{len(files)} image(s) -> {out}")
 
     written = failed = 0
-    taken = {out / f"{path.stem}.png" for path in files if path.suffix.lower() == ".png"}
+    if mode == "png":
+        taken = {out / f"{path.stem}.png" for path in files if path.suffix.lower() == ".png"}
+    else:
+        taken = {out / path.name for path in files if path.suffix.lower() in to_square.ALPHA_FORMATS}
     for path in files:
         try:
             if mode == "png":
@@ -58,7 +62,7 @@ def convert(folder: Path, mode: str, report) -> None:
                 note = to_png.convert_to_png(path, dst, args)
                 done = True
             else:
-                dst = out / path.name
+                dst = to_square.square_target(out, path, args, taken)
                 note = to_square.square_file(path, dst, args)
                 if note.startswith("already") and not dst.exists():
                     shutil.copy2(path, dst)
@@ -71,6 +75,19 @@ def convert(folder: Path, mode: str, report) -> None:
             report(f"  ! {path.name}: {type(error).__name__}: {error}")
 
     report(f"\nDone: {written} written, {failed} failed, in {out}")
+    return written, failed
+
+
+def self_test(folder: Path, report_path: Path) -> int:
+    lines: list[str] = []
+    failed = 0
+    for mode in ("square", "png"):
+        lines.append(f"== {JOBS[mode][0]} ==")
+        written, errors = convert(folder, mode, lines.append)
+        failed += errors
+        lines.append(f"written={written} failed={errors}")
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return 1 if failed else 0
 
 
 class App:
@@ -158,11 +175,16 @@ class App:
             self.root.after(80, self.drain)
 
 
-def main() -> None:
+def main() -> int:
+    if len(sys.argv) > 2 and sys.argv[1] == "--self-test":
+        return self_test(Path(sys.argv[2]),
+                         Path(sys.argv[3] if len(sys.argv) > 3 else "self-test.txt"))
+
     window = tk.Tk()
     App(window)
     window.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
