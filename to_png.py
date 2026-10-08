@@ -14,11 +14,12 @@ from to_square import (
     Options,
     SvgBox,
     fmt_num,
-    pad_frame,
     svg_box,
 )
 
 PNG_OPTIONS = {"optimize": True}
+
+PNG_MODES = {"1", "L", "LA", "I", "I;16", "I;16B", "I;16L", "I;16N", "P", "RGB", "RGBA"}
 
 
 ABSOLUTE_UNITS = {"", "px"}
@@ -117,6 +118,12 @@ def render_svg(src: Path, width: int, height: int) -> tuple[Image.Image, str]:
     raise RuntimeError("no SVG renderer available, tried " + "; ".join(problems))
 
 
+def png_ready(image: Image.Image) -> Image.Image:
+    if image.mode in PNG_MODES:
+        return image
+    return image.convert("RGBA" if "A" in image.getbands() else "RGB")
+
+
 def convert_to_png(src: Path, dst: Path, args: Options) -> str:
     if src.suffix.lower() in SVG_EXTS:
         box = svg_box(src.read_bytes())
@@ -125,9 +132,8 @@ def convert_to_png(src: Path, dst: Path, args: Options) -> str:
         if rendered.size != (width, height):
             raise ValueError(f"{backend} returned {rendered.size[0]}x{rendered.size[1]}, "
                              f"expected {width}x{height}")
-        canvas = pad_frame(rendered, True, args.anchor, args.bg)
-        canvas.save(dst, "PNG", **PNG_OPTIONS)
-        return (f"{width}x{height} -> {canvas.size[0]}x{canvas.size[1]} (svg via {backend})")
+        png_ready(rendered).save(dst, "PNG", **PNG_OPTIONS)
+        return f"{width}x{height} (svg via {backend})"
 
     with Image.open(src) as image:
         fmt = (image.format or "").upper()
@@ -138,21 +144,17 @@ def convert_to_png(src: Path, dst: Path, args: Options) -> str:
             if oriented is not None:
                 image = oriented
             width, height = image.size
-            canvas = pad_frame(image, True, args.anchor, args.bg)
-            canvas.save(dst, "PNG", **PNG_OPTIONS)
-            if (width, height) == canvas.size and not args.force:
-                return f"{width}x{height} -> {canvas.size[0]}x{canvas.size[1]} (already 1:1)"
-            return f"{width}x{height} -> {canvas.size[0]}x{canvas.size[1]}"
+            png_ready(image).save(dst, "PNG", **PNG_OPTIONS)
+            return f"{width}x{height}"
 
         frames, durations = [], []
         for index in range(image.n_frames):
             image.seek(index)
             durations.append(image.info.get("duration", 0))
-            frames.append(pad_frame(image.convert("RGBA"), True, args.anchor, args.bg))
+            frames.append(image.convert("RGBA"))
 
         width, height = image.size
         frames[0].save(dst, "PNG", **PNG_OPTIONS, save_all=True, append_images=frames[1:],
                        loop=image.info.get("loop", 0), disposal=2,
                        duration=max(10, round((sum(durations) or 100) / len(frames))))
-        side = frames[0].size[0]
-        return f"{width}x{height} -> {side}x{side} ({len(frames)} frames)"
+        return f"{width}x{height} ({len(frames)} frames)"
