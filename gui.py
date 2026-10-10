@@ -9,10 +9,12 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import to_png
+import to_portrait
 import to_square
 
 JOBS = {
     "square": ("Convert to 1:1", "square"),
+    "portrait": ("Convert to portrait", "portrait"),
     "png": ("Convert to PNG", "png"),
 }
 
@@ -46,7 +48,10 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
         report(f"No supported images in {folder}")
         return 0, 0
 
-    args = to_square.Options()
+    if mode == "portrait":
+        args = to_portrait.Options()
+    else:
+        args = to_square.Options()
     out.mkdir(parents=True, exist_ok=True)
     report(f"{len(files)} image(s) -> {out}")
 
@@ -62,8 +67,12 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
                 note = to_png.convert_to_png(path, dst, args)
                 done = True
             else:
-                dst = to_square.square_target(out, path, args, taken)
-                note = to_square.square_file(path, dst, args)
+                if mode == "portrait":
+                    dst = to_portrait.portrait_target(out, path, args, taken)
+                    note = to_portrait.portrait_file(path, dst, args)
+                else:
+                    dst = to_square.square_target(out, path, args, taken)
+                    note = to_square.square_file(path, dst, args)
                 if note.startswith("already") and not dst.exists():
                     shutil.copy2(path, dst)
                 done = dst.exists()
@@ -81,7 +90,7 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
 def self_test(folder: Path, report_path: Path) -> int:
     lines: list[str] = []
     failed = 0
-    for mode in ("square", "png"):
+    for mode in ("square", "portrait", "png"):
         lines.append(f"== {JOBS[mode][0]} ==")
         written, errors = convert(folder, mode, lines.append)
         failed += errors
@@ -110,9 +119,9 @@ class App:
         ttk.Button(frame, text="Choose...", command=self.choose).grid(row=0, column=2)
 
         self.buttons = {}
-        for column, mode in enumerate(("square", "png")):
+        for column, mode in enumerate(("square", "portrait", "png")):
             button = ttk.Button(frame, text=JOBS[mode][0], command=lambda m=mode: self.start(m))
-            button.grid(row=1, column=column, sticky="ew", padx=(0, 6) if column == 0 else 0, pady=(12, 0))
+            button.grid(row=1, column=column, sticky="ew", padx=(0, 6) if column < 2 else 0, pady=(12, 0))
             self.buttons[mode] = button
 
         self.log = tk.Text(frame, height=12, width=52, wrap="word", state="disabled")
