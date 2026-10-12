@@ -8,12 +8,14 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import to_landscape
 import to_png
 import to_portrait
 import to_square
 
 JOBS = {
     "square": ("Convert to 1:1", "square"),
+    "landscape": ("Convert to 2:1", "landscape"),
     "portrait": ("Convert to portrait", "portrait"),
     "png": ("Convert to PNG", "png"),
 }
@@ -50,6 +52,8 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
 
     if mode == "portrait":
         args = to_portrait.Options()
+    elif mode == "landscape":
+        args = to_landscape.Options()
     else:
         args = to_square.Options()
     out.mkdir(parents=True, exist_ok=True)
@@ -70,6 +74,9 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
                 if mode == "portrait":
                     dst = to_portrait.portrait_target(out, path, args, taken)
                     note = to_portrait.portrait_file(path, dst, args)
+                elif mode == "landscape":
+                    dst = to_landscape.landscape_target(out, path, args, taken)
+                    note = to_landscape.landscape_file(path, dst, args)
                 else:
                     dst = to_square.square_target(out, path, args, taken)
                     note = to_square.square_file(path, dst, args)
@@ -90,7 +97,7 @@ def convert(folder: Path, mode: str, report) -> tuple[int, int]:
 def self_test(folder: Path, report_path: Path) -> int:
     lines: list[str] = []
     failed = 0
-    for mode in ("square", "portrait", "png"):
+    for mode in ("square", "landscape", "portrait", "png"):
         lines.append(f"== {JOBS[mode][0]} ==")
         written, errors = convert(folder, mode, lines.append)
         failed += errors
@@ -119,13 +126,13 @@ class App:
         ttk.Button(frame, text="Choose...", command=self.choose).grid(row=0, column=2)
 
         self.buttons = {}
-        for column, mode in enumerate(("square", "portrait", "png")):
+        for column, mode in enumerate(("square", "landscape", "portrait", "png")):
             button = ttk.Button(frame, text=JOBS[mode][0], command=lambda m=mode: self.start(m))
-            button.grid(row=1, column=column, sticky="ew", padx=(0, 6) if column < 2 else 0, pady=(12, 0))
+            button.grid(row=1, column=column, sticky="ew", padx=(0, 6) if column < 3 else 0, pady=(12, 0))
             self.buttons[mode] = button
 
         self.log = tk.Text(frame, height=12, width=52, wrap="word", state="disabled")
-        self.log.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(12, 0))
+        self.log.grid(row=2, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
         frame.rowconfigure(2, weight=1)
         self.append("Choose a folder, then press a button.")
 
